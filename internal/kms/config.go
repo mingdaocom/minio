@@ -18,6 +18,7 @@
 package kms
 
 import (
+	"aead.dev/mtls"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -131,7 +132,7 @@ func Connect(ctx context.Context, opts *ConnectionOptions) (*KMS, error) {
 			return nil, err
 		}
 
-		key, err := kms.ParseAPIKey(env.Get(EnvKMSAPIKey, ""))
+		key, err := mtls.ParsePrivateKey(env.Get(EnvKMSAPIKey, ""))
 		if err != nil {
 			return nil, err
 		}
