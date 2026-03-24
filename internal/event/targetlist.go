@@ -77,6 +77,7 @@ type TargetList struct {
 	totalEvents       atomic.Int64
 	eventsSkipped     atomic.Int64
 	eventsErrorsTotal atomic.Int64
+	startOnce         sync.Once
 
 	sync.RWMutex
 	targets map[TargetID]Target
@@ -375,11 +376,9 @@ func (list *TargetList) startSendWorkers(workerCount int) {
 	wk.Wait()
 }
 
-var startOnce sync.Once
-
 // Init initialize target send workers.
 func (list *TargetList) Init(workers int) *TargetList {
-	startOnce.Do(func() {
+	list.startOnce.Do(func() {
 		go list.startSendWorkers(workers)
 	})
 	return list

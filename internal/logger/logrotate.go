@@ -18,11 +18,15 @@
 package logger
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/gzip"
@@ -68,6 +72,12 @@ type Writer struct {
 
 	pw *xioutil.PipeWriter
 	pr *xioutil.PipeReader
+
+	closeRequested atomic.Bool
+	closeOnce      sync.Once
+	closeDone      chan struct{}
+	listenDone     chan error
+	closeErr       error
 }
 
 // Write writes p into the current file, rotating if necessary.
@@ -81,26 +91,48 @@ func (w *Writer) Write(p []byte) (n int, err error) {
 // Any accepted writes will be flushed. Any new writes will be rejected.
 // Once Close() exits, files are synchronized to disk.
 func (w *Writer) Close() error {
-	w.pw.CloseWithError(nil)
-
-	if w.f != nil {
-		if err := w.closeCurrentFile(); err != nil {
-			return err
+	w.closeOnce.Do(func() {
+		w.closeRequested.Store(true)
+		if err := w.pw.CloseWithError(nil); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+			w.closeErr = err
+			close(w.closeDone)
+			return
 		}
-	}
+		w.closeErr = <-w.listenDone
+		close(w.closeDone)
+	})
 
-	return nil
+	<-w.closeDone
+	return w.closeErr
 }
 
 var stdErrEnc = json.NewEncoder(os.Stderr)
 
 func (w *Writer) listen() {
+	var finalErr error
+	nextReader := io.Reader(w.pr)
+	defer func() {
+		w.listenDone <- finalErr
+		close(w.listenDone)
+	}()
+
 	for {
-		var r io.Reader = w.pr
+		r := nextReader
+		nextReader = w.pr
+		reachedLimit := false
 		if w.opts.MaximumFileSize > 0 {
-			r = io.LimitReader(w.pr, w.opts.MaximumFileSize)
-		}
-		if _, err := io.Copy(w.f, r); err != nil {
+			lr := &io.LimitedReader{R: r, N: w.opts.MaximumFileSize}
+			if _, err := io.Copy(w.f, lr); err != nil {
+				msg := fmt.Sprintf("unable to write to log file %v: %v", w.f.Name(), err)
+				stdErrEnc.Encode(&log.Entry{
+					Level:   ErrorKind,
+					Message: msg,
+					Time:    time.Now().UTC(),
+					Trace:   &log.Trace{Message: msg},
+				})
+			}
+			reachedLimit = lr.N == 0
+		} else if _, err := io.Copy(w.f, r); err != nil {
 			msg := fmt.Sprintf("unable to write to log file %v: %v", w.f.Name(), err)
 			stdErrEnc.Encode(&log.Entry{
 				Level:   ErrorKind,
@@ -108,6 +140,31 @@ func (w *Writer) listen() {
 				Time:    time.Now().UTC(),
 				Trace:   &log.Trace{Message: msg},
 			})
+		}
+		if w.closeRequested.Load() {
+			if reachedLimit {
+				var peek [1]byte
+				n, err := w.pr.Read(peek[:])
+				switch {
+				case n > 0:
+					if err := w.rotate(); err != nil {
+						finalErr = err
+						return
+					}
+					nextReader = io.MultiReader(bytes.NewReader(peek[:n]), w.pr)
+					continue
+				case errors.Is(err, io.EOF):
+					// No buffered writes remain; close the current file below.
+				case err != nil:
+					finalErr = err
+				}
+			}
+			if w.f != nil {
+				if err := w.closeCurrentFile(); err != nil && finalErr == nil {
+					finalErr = err
+				}
+			}
+			return
 		}
 		if err := w.rotate(); err != nil {
 			msg := fmt.Sprintf("unable to rotate log file %v: %v", w.f.Name(), err)
@@ -218,9 +275,11 @@ func NewDir(opts Options) (io.WriteCloser, error) {
 	pr, pw := xioutil.WaitPipe()
 
 	w := &Writer{
-		opts: opts,
-		pw:   pw,
-		pr:   pr,
+		opts:       opts,
+		pw:         pw,
+		pr:         pr,
+		closeDone:  make(chan struct{}),
+		listenDone: make(chan error, 1),
 	}
 
 	if w.f == nil {

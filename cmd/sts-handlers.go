@@ -883,6 +883,11 @@ func (sts *stsAPIHandlers) AssumeRoleWithCertificate(w http.ResponseWriter, r *h
 		return
 	}
 
+	if err := parseForm(r); err != nil {
+		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, err)
+		return
+	}
+
 	expiry, err := globalIAMSys.STSTLSConfig.GetExpiryDuration(r.Form.Get(stsDurationSeconds))
 	if err != nil {
 		writeSTSErrorResponse(ctx, w, ErrSTSMissingParameter, err)
@@ -969,6 +974,11 @@ func (sts *stsAPIHandlers) AssumeRoleWithCustomToken(w http.ResponseWriter, r *h
 	authn := newGlobalAuthNPluginFn()
 	if authn == nil {
 		writeSTSErrorResponse(ctx, w, ErrSTSNotInitialized, errors.New("STS API 'AssumeRoleWithCustomToken' is disabled"))
+		return
+	}
+
+	if err := parseForm(r); err != nil {
+		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, err)
 		return
 	}
 

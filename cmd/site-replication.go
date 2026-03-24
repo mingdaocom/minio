@@ -393,6 +393,46 @@ func (c *SiteReplicationSys) getSiteStatuses(ctx context.Context, sites ...madmi
 	return
 }
 
+func srPeersHaveReplicateILMExpiry(peers map[string]madmin.PeerInfo) bool {
+	for _, pi := range peers {
+		if pi.ReplicateILMExpiry {
+			return true
+		}
+	}
+	return false
+}
+
+func buildSRJoinPeers(existingPeers map[string]madmin.PeerInfo, sites []PeerSiteInfo, replicateILMExpiry bool) map[string]madmin.PeerInfo {
+	if srPeersHaveReplicateILMExpiry(existingPeers) {
+		replicateILMExpiry = true
+	}
+
+	peers := make(map[string]madmin.PeerInfo, len(sites))
+	for _, site := range sites {
+		peers[site.DeploymentID] = madmin.PeerInfo{
+			Endpoint:           site.Endpoint,
+			Name:               site.Name,
+			DeploymentID:       site.DeploymentID,
+			ReplicateILMExpiry: replicateILMExpiry,
+		}
+	}
+	return peers
+}
+
+func mergeSRJoinPeers(existingPeers, incomingPeers map[string]madmin.PeerInfo) map[string]madmin.PeerInfo {
+	peers := make(map[string]madmin.PeerInfo, len(incomingPeers))
+	for dID, pi := range incomingPeers {
+		if existingPeers != nil {
+			if existingPeer, ok := existingPeers[dID]; ok && !pi.ReplicateILMExpiry && existingPeer.ReplicateILMExpiry {
+				// Preserve the already-enabled setting from the current state.
+				pi.ReplicateILMExpiry = existingPeer.ReplicateILMExpiry
+			}
+		}
+		peers[dID] = pi
+	}
+	return peers
+}
+
 // AddPeerClusters - add cluster sites for replication configuration.
 func (c *SiteReplicationSys) AddPeerClusters(ctx context.Context, psites []madmin.PeerSite, opts madmin.SRAddOptions) (madmin.ReplicateAddStatus, error) {
 	sites, serr := c.getSiteStatuses(ctx, psites...)
@@ -505,34 +545,7 @@ func (c *SiteReplicationSys) AddPeerClusters(ctx context.Context, psites []madmi
 		Peers:            make(map[string]madmin.PeerInfo),
 		UpdatedAt:        currTime,
 	}
-	// check if few peers exist already and ILM expiry replcation is set to true
-	replicateILMExpirySet := false
-	if c.state.Peers != nil {
-		for _, pi := range c.state.Peers {
-			if pi.ReplicateILMExpiry {
-				replicateILMExpirySet = true
-				break
-			}
-		}
-	}
-	for _, v := range sites {
-		var peerReplicateILMExpiry bool
-		// if peers already exist and for one of them ReplicateILMExpiry
-		// set true, that means earlier replication of ILM expiry was set
-		// for the site replication. All new sites added to the setup should
-		// get this enabled as well
-		if replicateILMExpirySet {
-			peerReplicateILMExpiry = replicateILMExpirySet
-		} else {
-			peerReplicateILMExpiry = opts.ReplicateILMExpiry
-		}
-		joinReq.Peers[v.DeploymentID] = madmin.PeerInfo{
-			Endpoint:           v.Endpoint,
-			Name:               v.Name,
-			DeploymentID:       v.DeploymentID,
-			ReplicateILMExpiry: peerReplicateILMExpiry,
-		}
-	}
+	joinReq.Peers = buildSRJoinPeers(c.state.Peers, sites, opts.ReplicateILMExpiry)
 
 	addedCount := 0
 	var (
@@ -635,19 +648,7 @@ func (c *SiteReplicationSys) PeerJoinReq(ctx context.Context, arg madmin.SRPeerJ
 		return errSRServiceAccount(fmt.Errorf("unable to create service account on %s: %v", ourName, err))
 	}
 
-	peers := make(map[string]madmin.PeerInfo, len(arg.Peers))
-	for dID, pi := range arg.Peers {
-		if c.state.Peers != nil {
-			if existingPeer, ok := c.state.Peers[dID]; ok {
-				// retain existing ReplicateILMExpiry of peer if its already set
-				// and incoming arg has it false. it could be default false
-				if !pi.ReplicateILMExpiry && existingPeer.ReplicateILMExpiry {
-					pi.ReplicateILMExpiry = existingPeer.ReplicateILMExpiry
-				}
-			}
-		}
-		peers[dID] = pi
-	}
+	peers := mergeSRJoinPeers(c.state.Peers, arg.Peers)
 	state := srState{
 		Name:                    ourName,
 		Peers:                   peers,

@@ -18,11 +18,13 @@
 package http
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -217,6 +219,62 @@ nextTest:
 		}
 
 		listener.Close()
+	}
+}
+
+type fakeClosingListener struct {
+	closeOnce sync.Once
+	closeCh   chan struct{}
+	calls     atomic.Int32
+}
+
+func newFakeClosingListener() *fakeClosingListener {
+	return &fakeClosingListener{
+		closeCh: make(chan struct{}),
+	}
+}
+
+func (f *fakeClosingListener) Accept() (net.Conn, error) {
+	f.calls.Add(1)
+	<-f.closeCh
+	return nil, net.ErrClosed
+}
+
+func (f *fakeClosingListener) Close() error {
+	f.closeOnce.Do(func() {
+		close(f.closeCh)
+	})
+	return nil
+}
+
+func (f *fakeClosingListener) Addr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func TestHTTPListenerCloseStopsAcceptLoop(t *testing.T) {
+	fake := newFakeClosingListener()
+	listener := &httpListener{
+		listeners: []net.Listener{fake},
+		acceptCh:  make(chan acceptResult, 1),
+	}
+	listener.ctx, listener.ctxCanceler = context.WithCancel(t.Context())
+	listener.start()
+
+	deadline := time.Now().Add(time.Second)
+	for fake.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if fake.calls.Load() == 0 {
+		t.Fatal("expected accept loop to start")
+	}
+
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	if got := fake.calls.Load(); got != 1 {
+		t.Fatalf("expected accept loop to exit after close, got %d accepts", got)
 	}
 }
 

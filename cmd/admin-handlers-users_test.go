@@ -983,6 +983,84 @@ func (s *TestSuiteIAM) TestServiceAccountOpsByUser(c *check) {
 	c.mustNotCreateSvcAccount(ctx, globalActiveCred.AccessKey, userAdmClient)
 }
 
+func (s *TestSuiteIAM) TestAccessKeyListingQueryParams(c *check) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+
+	accessKey, secretKey := mustGenerateCredentials(c)
+	err := s.adm.SetUser(ctx, accessKey, secretKey, madmin.AccountEnabled)
+	if err != nil {
+		c.Fatalf("Unable to set user: %v", err)
+	}
+
+	svcCred, err := s.adm.AddServiceAccount(ctx, madmin.AddServiceAccountReq{
+		TargetUser: accessKey,
+	})
+	if err != nil {
+		c.Fatalf("admin should be able to create service account for target user: %v", err)
+	}
+
+	listResp, err := s.adm.ListServiceAccounts(ctx, accessKey)
+	if err != nil {
+		c.Fatalf("unable to list service accounts for target user: %v", err)
+	}
+
+	var foundSvcAcc bool
+	for _, item := range listResp.Accounts {
+		if item.AccessKey == svcCred.AccessKey {
+			foundSvcAcc = true
+			break
+		}
+	}
+	if !foundSvcAcc {
+		c.Fatalf("target user's service account did not appear in listing")
+	}
+
+	keyResp, err := s.adm.ListAccessKeysBulk(ctx, []string{accessKey}, madmin.ListAccessKeysOpts{
+		ListType: madmin.AccessKeyListAll,
+	})
+	if err != nil {
+		c.Fatalf("unable to list access keys for target user: %v", err)
+	}
+
+	userKeys, ok := keyResp[accessKey]
+	if !ok {
+		c.Fatalf("target user did not appear in bulk access key listing")
+	}
+
+	foundSvcAcc = false
+	for _, item := range userKeys.ServiceAccounts {
+		if item.AccessKey == svcCred.AccessKey {
+			foundSvcAcc = true
+			break
+		}
+	}
+	if !foundSvcAcc {
+		c.Fatalf("target user's service account did not appear in bulk access key listing")
+	}
+}
+
+func TestIAMAccessKeyListingQueryParams(t *testing.T) {
+	if runtime.GOOS == globalWindowsOSName {
+		t.Skip("windows is clunky disable these tests")
+	}
+
+	for i, testCase := range iamTestSuites {
+		t.Run(
+			fmt.Sprintf("Test: %d, ServerType: %s", i+1, testCase.ServerTypeDescription),
+			func(t *testing.T) {
+				suite := testCase
+				c := &check{t, testCase.serverType}
+
+				suite.SetUpSuite(c)
+				defer suite.TearDownSuite(c)
+
+				suite.TestAccessKeyListingQueryParams(c)
+			},
+		)
+	}
+}
+
 func (s *TestSuiteIAM) TestServiceAccountDurationSecondsCondition(c *check) {
 	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
 	defer cancel()

@@ -44,6 +44,10 @@ func (a adminAPIHandlers) SiteReplicationAdd(w http.ResponseWriter, r *http.Requ
 	if objectAPI == nil {
 		return
 	}
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+		return
+	}
 
 	var sites []madmin.PeerSite
 	if err := parseJSONBody(ctx, r.Body, &sites, cred.SecretKey); err != nil {
@@ -71,6 +75,30 @@ func (a adminAPIHandlers) SiteReplicationAdd(w http.ResponseWriter, r *http.Requ
 func getSRAddOptions(r *http.Request) (opts madmin.SRAddOptions) {
 	opts.ReplicateILMExpiry = r.Form.Get("replicateILMExpiry") == "true"
 	return
+}
+
+func getSRBucketMakeOptions(r *http.Request) MakeBucketOptions {
+	createdAt, cerr := time.Parse(time.RFC3339Nano, strings.TrimSpace(r.Form.Get("createdAt")))
+	if cerr != nil {
+		createdAt = timeSentinel
+	}
+
+	return MakeBucketOptions{
+		LockEnabled:       r.Form.Get("lockEnabled") == "true",
+		VersioningEnabled: r.Form.Get("versioningEnabled") == "true",
+		ForceCreate:       r.Form.Get("forceCreate") == "true",
+		CreatedAt:         createdAt,
+	}
+}
+
+func getSiteReplicationNetPerfDuration(r *http.Request) time.Duration {
+	_ = parseForm(r)
+
+	duration, _ := time.ParseDuration(r.Form.Get(peerRESTDuration))
+	if duration < globalNetPerfMinDuration {
+		duration = globalNetPerfMinDuration
+	}
+	return duration
 }
 
 // SRPeerJoin - PUT /minio/admin/v3/site-replication/join
@@ -106,6 +134,10 @@ func (a adminAPIHandlers) SRPeerBucketOps(w http.ResponseWriter, r *http.Request
 	if objectAPI == nil {
 		return
 	}
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+		return
+	}
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -116,18 +148,7 @@ func (a adminAPIHandlers) SRPeerBucketOps(w http.ResponseWriter, r *http.Request
 	default:
 		err = errSRInvalidRequest(errInvalidArgument)
 	case madmin.MakeWithVersioningBktOp:
-		createdAt, cerr := time.Parse(time.RFC3339Nano, strings.TrimSpace(r.Form.Get("createdAt")))
-		if cerr != nil {
-			createdAt = timeSentinel
-		}
-
-		opts := MakeBucketOptions{
-			LockEnabled:       r.Form.Get("lockEnabled") == "true",
-			VersioningEnabled: r.Form.Get("versioningEnabled") == "true",
-			ForceCreate:       r.Form.Get("forceCreate") == "true",
-			CreatedAt:         createdAt,
-		}
-		err = globalSiteReplicationSys.PeerBucketMakeWithVersioningHandler(ctx, bucket, opts)
+		err = globalSiteReplicationSys.PeerBucketMakeWithVersioningHandler(ctx, bucket, getSRBucketMakeOptions(r))
 	case madmin.ConfigureReplBktOp:
 		err = globalSiteReplicationSys.PeerBucketConfigureReplHandler(ctx, bucket)
 	case madmin.DeleteBucketBktOp, madmin.ForceDeleteBucketBktOp:
@@ -396,6 +417,10 @@ func (a adminAPIHandlers) SiteReplicationEdit(w http.ResponseWriter, r *http.Req
 	if objectAPI == nil {
 		return
 	}
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+		return
+	}
 	var site madmin.PeerInfo
 	err := parseJSONBody(ctx, r.Body, &site, cred.SecretKey)
 	if err != nil {
@@ -613,11 +638,10 @@ func (a adminAPIHandlers) SiteReplicationDevNull(w http.ResponseWriter, r *http.
 // SiteReplicationNetPerf - everything goes to io.Discard
 // [POST] /minio/admin/v3/site-replication/netperf
 func (a adminAPIHandlers) SiteReplicationNetPerf(w http.ResponseWriter, r *http.Request) {
-	durationStr := r.Form.Get(peerRESTDuration)
-	duration, _ := time.ParseDuration(durationStr)
-	if duration < globalNetPerfMinDuration {
-		duration = globalNetPerfMinDuration
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(r.Context(), w, toAdminAPIErr(r.Context(), err), r.URL)
+		return
 	}
-	result := siteNetperf(r.Context(), duration)
+	result := siteNetperf(r.Context(), getSiteReplicationNetPerfDuration(r))
 	adminLogIf(r.Context(), gob.NewEncoder(w).Encode(result))
 }

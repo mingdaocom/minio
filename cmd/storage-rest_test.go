@@ -20,12 +20,17 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/minio/minio/internal/grid"
 	xnet "github.com/minio/pkg/v3/net"
 )
@@ -293,6 +298,119 @@ func testStorageAPIRenameFile(t *testing.T, storage StorageAPI) {
 	}
 }
 
+func TestKeepHTTPResponseAliveRoundTripSuccess(t *testing.T) {
+	rec := httptest.NewRecorder()
+	done := keepHTTPResponseAlive(rec)
+	done(nil)
+
+	payload := []byte("response payload")
+	if _, err := rec.Write(payload); err != nil {
+		t.Fatalf("unable to write payload: %v", err)
+	}
+
+	reader, err := waitForHTTPResponse(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("waitForHTTPResponse failed: %v", err)
+	}
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("unable to read payload: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("expected payload %q, got %q", payload, got)
+	}
+}
+
+func TestKeepHTTPResponseAliveRoundTripError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	done := keepHTTPResponseAlive(rec)
+	wantErr := errors.New("response failed")
+	done(wantErr)
+
+	if _, err := waitForHTTPResponse(bytes.NewReader(rec.Body.Bytes())); err == nil || err.Error() != wantErr.Error() {
+		t.Fatalf("expected error %q, got %v", wantErr, err)
+	}
+}
+
+func TestKeepHTTPReqResponseAliveBodyReadAndCloseRelease(t *testing.T) {
+	testCases := []struct {
+		name    string
+		release func(io.ReadCloser) error
+	}{
+		{
+			name: "read",
+			release: func(body io.ReadCloser) error {
+				_, err := io.ReadAll(body)
+				return err
+			},
+		},
+		{
+			name: "close",
+			release: func(body io.ReadCloser) error {
+				return body.Close()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://example.com", strings.NewReader("request body"))
+			rec := httptest.NewRecorder()
+			done, body := keepHTTPReqResponseAlive(rec, req)
+
+			if err := tc.release(body); err != nil {
+				t.Fatalf("unable to release request body: %v", err)
+			}
+
+			done(nil)
+
+			if got := rec.Body.Bytes(); !bytes.Equal(got, []byte{0}) {
+				t.Fatalf("expected response sentinel 0, got %v", got)
+			}
+		})
+	}
+}
+
+func TestStreamHTTPResponseRoundTrip(t *testing.T) {
+	rec := httptest.NewRecorder()
+	resp := streamHTTPResponse(rec)
+
+	blocks := [][]byte{[]byte("first block"), []byte("second block")}
+	for i, block := range blocks {
+		n, err := resp.Write(block)
+		if err != nil {
+			t.Fatalf("write block %d failed: %v", i+1, err)
+		}
+		if n != len(block) {
+			t.Fatalf("write block %d: expected %d bytes written, got %d", i+1, len(block), n)
+		}
+	}
+	resp.CloseWithError(nil)
+
+	var got bytes.Buffer
+	if err := waitForHTTPStream(io.NopCloser(bytes.NewReader(rec.Body.Bytes())), &got); err != nil {
+		t.Fatalf("waitForHTTPStream failed: %v", err)
+	}
+
+	want := append(append([]byte{}, blocks[0]...), blocks[1]...)
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("expected payload %q, got %q", want, got.Bytes())
+	}
+}
+
+func TestStreamHTTPResponseRoundTripError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	resp := streamHTTPResponse(rec)
+	wantErr := errors.New("stream failed")
+	resp.CloseWithError(wantErr)
+
+	var got bytes.Buffer
+	if err := waitForHTTPStream(io.NopCloser(bytes.NewReader(rec.Body.Bytes())), &got); err == nil || err.Error() != wantErr.Error() {
+		t.Fatalf("expected error %q, got %v", wantErr, err)
+	}
+}
+
 func newStorageRESTHTTPServerClient(t testing.TB) *storageRESTClient {
 	// Grid with 2 hosts
 	tg, err := grid.SetupTestGrid(2)
@@ -410,4 +528,59 @@ func TestStorageRESTClientRenameFile(t *testing.T) {
 	restClient := newStorageRESTHTTPServerClient(t)
 
 	testStorageAPIRenameFile(t, restClient)
+}
+
+func TestStorageRESTClientDeleteVersionPassesDeleteOptions(t *testing.T) {
+	restClient := newStorageRESTHTTPServerClient(t)
+	storage := globalLocalSetDrives[0][0][0]
+	if storage == nil {
+		t.Fatal("expected local storage to be initialized")
+	}
+
+	ctx := t.Context()
+	volume := "foo"
+	object := "delete-version-with-options"
+	versionID := uuid.New().String()
+	fi := FileInfo{
+		Name: object, Volume: volume, VersionID: versionID, ModTime: UTCNow(), DataDir: uuid.New().String(), Size: 10000,
+		Erasure: ErasureInfo{
+			Algorithm:    erasureAlgorithm,
+			DataBlocks:   4,
+			ParityBlocks: 4,
+			BlockSize:    blockSizeV2,
+			Index:        1,
+			Distribution: []int{0, 1, 2, 3, 4, 5, 6, 7},
+		},
+	}
+	if err := storage.WriteMetadata(ctx, "", volume, object, fi); err != nil {
+		t.Fatalf("Unable to create metadata, %s", err)
+	}
+
+	backupBuf, err := storage.ReadAll(ctx, volume, pathJoin(object, xlStorageFormatFile))
+	if err != nil {
+		t.Fatalf("Unable to read metadata, %s", err)
+	}
+
+	oldDataDir := uuid.New().String()
+	if err := storage.WriteAll(ctx, volume, pathJoin(object, oldDataDir, xlStorageFormatFileBackup), backupBuf); err != nil {
+		t.Fatalf("Unable to create backup metadata, %s", err)
+	}
+
+	if err := restClient.DeleteVersion(ctx, volume, object, FileInfo{Name: object, Volume: volume, VersionID: versionID}, false, DeleteOptions{
+		UndoWrite:  true,
+		OldDataDir: oldDataDir,
+	}); err != nil {
+		t.Fatalf("DeleteVersion failed, %s", err)
+	}
+
+	restoredBuf, err := storage.ReadAll(ctx, volume, pathJoin(object, xlStorageFormatFile))
+	if err != nil {
+		t.Fatalf("Unable to read restored metadata, %s", err)
+	}
+	if !bytes.Equal(restoredBuf, backupBuf) {
+		t.Fatal("expected restored metadata to match backup after undo write")
+	}
+	if _, err := storage.ReadAll(ctx, volume, pathJoin(object, oldDataDir, xlStorageFormatFileBackup)); err != errFileNotFound {
+		t.Fatalf("expected backup metadata to be consumed by undo write, got %v", err)
+	}
 }

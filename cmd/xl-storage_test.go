@@ -1734,6 +1734,86 @@ func TestXLStorageDeleteVersion(t *testing.T) {
 	}
 }
 
+func TestXLStorageCleanAbandonedDataUpdatesInlineMetadata(t *testing.T) {
+	xlStorage, _, err := newXLStorageTestSetup(t)
+	if err != nil {
+		t.Fatalf("Unable to create xlStorage test setup, %s", err)
+	}
+	ctx := t.Context()
+
+	volume := "inline-cleanup-vol"
+	object := "inline-cleanup-object"
+	if err := xlStorage.MakeVol(ctx, volume); err != nil {
+		t.Fatalf("Unable to create volume, %s", err)
+	}
+
+	referencedDataDir := uuid.New().String()
+	orphanDataDir := uuid.New().String()
+	fi := FileInfo{
+		Name: object, Volume: volume, VersionID: uuid.New().String(), ModTime: UTCNow(), DataDir: referencedDataDir, Size: 10000,
+		Erasure: ErasureInfo{
+			Algorithm:    erasureAlgorithm,
+			DataBlocks:   4,
+			ParityBlocks: 4,
+			BlockSize:    blockSizeV2,
+			Index:        1,
+			Distribution: []int{0, 1, 2, 3, 4, 5, 6, 7},
+		},
+	}
+	if err := xlStorage.WriteMetadata(ctx, "", volume, object, fi); err != nil {
+		t.Fatalf("Unable to create metadata, %s", err)
+	}
+
+	buf, err := xlStorage.ReadAll(ctx, volume, pathJoin(object, xlStorageFormatFile))
+	if err != nil {
+		t.Fatalf("Unable to read metadata, %s", err)
+	}
+
+	var xl xlMetaV2
+	if err := xl.LoadOrConvert(buf); err != nil {
+		t.Fatalf("Unable to decode metadata, %s", err)
+	}
+
+	xl.data.replace(referencedDataDir, []byte("keep"))
+	xl.data.replace(orphanDataDir, []byte("remove"))
+
+	buf, err = xl.AppendTo(nil)
+	if err != nil {
+		t.Fatalf("Unable to re-encode metadata, %s", err)
+	}
+	if err := xlStorage.WriteAll(ctx, volume, pathJoin(object, xlStorageFormatFile), buf); err != nil {
+		t.Fatalf("Unable to update metadata, %s", err)
+	}
+
+	if err := xlStorage.CleanAbandonedData(ctx, volume, object); err != nil {
+		t.Fatalf("CleanAbandonedData failed, %s", err)
+	}
+
+	buf, err = xlStorage.ReadAll(ctx, volume, pathJoin(object, xlStorageFormatFile))
+	if err != nil {
+		t.Fatalf("Unable to read cleaned metadata, %s", err)
+	}
+
+	var cleaned xlMetaV2
+	if err := cleaned.LoadOrConvert(buf); err != nil {
+		t.Fatalf("Unable to decode cleaned metadata, %s", err)
+	}
+
+	inlineKeys, err := cleaned.data.list()
+	if err != nil {
+		t.Fatalf("Unable to list inline data, %s", err)
+	}
+	if len(inlineKeys) != 1 || inlineKeys[0] != referencedDataDir {
+		t.Fatalf("expected only referenced inline data to remain, got %v", inlineKeys)
+	}
+	if !bytes.Equal(cleaned.data.find(referencedDataDir), []byte("keep")) {
+		t.Fatalf("expected referenced inline data to be preserved")
+	}
+	if cleaned.data.find(orphanDataDir) != nil {
+		t.Fatalf("expected orphan inline data %s to be removed", orphanDataDir)
+	}
+}
+
 // TestXLStorage xlStorage.StatInfoFile()
 func TestXLStorageStatInfoFile(t *testing.T) {
 	// create xlStorage test setup

@@ -73,6 +73,19 @@ func newMetricsV3Server(auth func(h http.Handler) http.Handler) *metricsV3Server
 	}
 }
 
+func normalizeMetricsPath(pathComponents string) (string, []string) {
+	var buckets []string
+	if strings.HasPrefix(pathComponents, "/bucket/") {
+		// bucket specific metrics use the last path component as the bucket name.
+		// e.g. /bucket/api/<bucket-name>.
+		bucketIdx := strings.LastIndex(pathComponents, "/")
+		buckets = append(buckets, pathComponents[bucketIdx+1:])
+		// remove the dynamic bucket name before matching collector paths.
+		pathComponents = pathComponents[:bucketIdx]
+	}
+	return pathComponents, buckets
+}
+
 // metricDisplay - contains info on a metric for display purposes.
 type metricDisplay struct {
 	Name   string   `json:"name"`
@@ -219,19 +232,8 @@ func (h *metricsV3Server) handle(path string, isListingRequest bool, buckets []s
 // Bucket metrics will be returned only for the provided buckets. If no buckets
 // parameter is provided, no bucket metrics are returned.
 func (h *metricsV3Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	pathComponents := mux.Vars(r)["pathComps"]
+	pathComponents, buckets := normalizeMetricsPath(mux.Vars(r)["pathComps"])
 	isListingRequest := r.Form.Has("list")
-
-	var buckets []string
-	if strings.HasPrefix(pathComponents, "/bucket/") {
-		// bucket specific metrics, extract the bucket name from the path.
-		// it's the last part of the path. e.g. /bucket/api/<bucket-name>
-		bucketIdx := strings.LastIndex(pathComponents, "/")
-		buckets = append(buckets, pathComponents[bucketIdx+1:])
-		// remove bucket from pathComponents as it is dyanamic and
-		// hence not included in the collector path.
-		pathComponents = pathComponents[:bucketIdx]
-	}
 
 	innerHandler := h.handle(pathComponents, isListingRequest, buckets)
 

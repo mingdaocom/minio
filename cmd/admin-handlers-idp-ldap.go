@@ -574,23 +574,8 @@ func (a adminAPIHandlers) ListAccessKeysLDAPBulk(w http.ResponseWriter, r *http.
 		}
 	}
 
-	listType := r.Form.Get("listType")
-	var listSTSKeys, listServiceAccounts bool
-	switch listType {
-	case madmin.AccessKeyListUsersOnly:
-		listSTSKeys = false
-		listServiceAccounts = false
-	case madmin.AccessKeyListSTSOnly:
-		listSTSKeys = true
-		listServiceAccounts = false
-	case madmin.AccessKeyListSvcaccOnly:
-		listSTSKeys = false
-		listServiceAccounts = true
-	case madmin.AccessKeyListAll:
-		listSTSKeys = true
-		listServiceAccounts = true
-	default:
-		err := errors.New("invalid list type")
+	listSTSKeys, listServiceAccounts, err := parseAccessKeyBulkListType(r.Form.Get("listType"))
+	if err != nil {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErrWithErr(ErrInvalidRequest, err), r.URL)
 		return
 	}

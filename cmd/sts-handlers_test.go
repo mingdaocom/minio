@@ -20,8 +20,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"slices"
@@ -34,6 +39,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	cr "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/set"
+	idplugin "github.com/minio/minio/internal/config/identity/plugin"
+	tlscfg "github.com/minio/minio/internal/config/identity/tls"
 	"github.com/minio/pkg/v3/ldap"
 )
 
@@ -48,6 +55,68 @@ func runAllIAMSTSTests(suite *TestSuiteIAM, c *check) {
 	suite.TestSTSWithGroupPolicy(c)
 	suite.TestSTSTokenRevoke(c)
 	suite.TearDownSuite(c)
+}
+
+func TestAssumeRoleWithCertificateParsesQueryParams(t *testing.T) {
+	oldIAMSys := globalIAMSys
+	oldSiteReplicationSys := globalSiteReplicationSys
+	defer func() {
+		globalIAMSys = oldIAMSys
+		globalSiteReplicationSys = oldSiteReplicationSys
+	}()
+
+	globalIAMSys = &IAMSys{
+		store: &IAMStoreSys{},
+		STSTLSConfig: tlscfg.Config{
+			Enabled:            true,
+			InsecureSkipVerify: true,
+		},
+	}
+	globalSiteReplicationSys = SiteReplicationSys{}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", strings.NewReader("DurationSeconds=abc"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{
+			{
+				Subject:     pkix.Name{CommonName: "test-cn"},
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				NotAfter:    UTCNow().Add(2 * time.Hour),
+			},
+		},
+	}
+	rec := httptest.NewRecorder()
+
+	(&stsAPIHandlers{}).AssumeRoleWithCertificate(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "invalid token expiry") {
+		t.Fatalf("expected parsed DurationSeconds error, got %q", rec.Body.String())
+	}
+}
+
+func TestAssumeRoleWithCustomTokenParsesQueryParams(t *testing.T) {
+	oldIAMSys := globalIAMSys
+	oldSiteReplicationSys := globalSiteReplicationSys
+	oldAuthPlugin := globalAuthNPlugin
+	defer func() {
+		globalIAMSys = oldIAMSys
+		globalSiteReplicationSys = oldSiteReplicationSys
+		globalAuthNPlugin = oldAuthPlugin
+	}()
+
+	globalIAMSys = &IAMSys{store: &IAMStoreSys{}}
+	globalSiteReplicationSys = SiteReplicationSys{}
+	globalAuthNPlugin = &idplugin.AuthNPlugin{}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/", strings.NewReader("Action=AssumeRoleWithCustomToken&Token=test-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	(&stsAPIHandlers{}).AssumeRoleWithCustomToken(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "Error processing parameter RoleArn") {
+		t.Fatalf("expected parsed Action/Token query to reach role ARN validation, got %q", rec.Body.String())
+	}
 }
 
 func TestIAMInternalIDPSTSServerSuite(t *testing.T) {

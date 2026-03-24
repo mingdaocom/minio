@@ -362,8 +362,7 @@ func (s *storageRESTServer) DeleteVersionHandler(p *DeleteVersionHandlerParams) 
 	filePath := p.FilePath
 	forceDelMarker := p.ForceDelMarker
 
-	opts := DeleteOptions{}
-	err := s.getStorage().DeleteVersion(context.Background(), volume, filePath, p.FI, forceDelMarker, opts)
+	err := s.getStorage().DeleteVersion(context.Background(), volume, filePath, p.FI, forceDelMarker, p.Opts)
 	return np, grid.NewRemoteErr(err)
 }
 
@@ -770,6 +769,15 @@ func (c *closeNotifier) Close() error {
 	return c.rc.Close()
 }
 
+func writeHTTPResponseResult(write func([]byte), err error) {
+	if err != nil {
+		write([]byte{1})
+		write([]byte(err.Error()))
+		return
+	}
+	write([]byte{0})
+}
+
 // keepHTTPReqResponseAlive can be used to avoid timeouts with long storage
 // operations, such as bitrot verification or data usage scanning.
 // Every 10 seconds a space character is sent.
@@ -797,12 +805,7 @@ func keepHTTPReqResponseAlive(w http.ResponseWriter, r *http.Request) (resp func
 		case <-ctx.Done():
 		case <-bodyDoneCh:
 		case err := <-doneCh:
-			if err != nil {
-				write([]byte{1})
-				write([]byte(err.Error()))
-			} else {
-				write([]byte{0})
-			}
+			writeHTTPResponseResult(write, err)
 			xioutil.SafeClose(doneCh)
 			return
 		}
@@ -819,12 +822,7 @@ func keepHTTPReqResponseAlive(w http.ResponseWriter, r *http.Request) (resp func
 				// write the filler byte.
 				select {
 				case err := <-doneCh:
-					if err != nil {
-						write([]byte{1})
-						write([]byte(err.Error()))
-					} else {
-						write([]byte{0})
-					}
+					writeHTTPResponseResult(write, err)
 					return
 				default:
 				}
@@ -835,12 +833,7 @@ func keepHTTPReqResponseAlive(w http.ResponseWriter, r *http.Request) (resp func
 					xhttp.Flush(w)
 				}
 			case err := <-doneCh:
-				if err != nil {
-					write([]byte{1})
-					write([]byte(err.Error()))
-				} else {
-					write([]byte{0})
-				}
+				writeHTTPResponseResult(write, err)
 				return
 			}
 		}
@@ -1029,12 +1022,7 @@ func streamHTTPResponse(w http.ResponseWriter) *httpStreamResponse {
 					xhttp.Flush(w)
 				}
 			case err := <-doneCh:
-				if err != nil {
-					write([]byte{1})
-					write([]byte(err.Error()))
-				} else {
-					write([]byte{0})
-				}
+				writeHTTPResponseResult(write, err)
 				xioutil.SafeClose(doneCh)
 				return
 			case block := <-blockCh:

@@ -57,10 +57,21 @@ func (listener *httpListener) start() {
 	}
 
 	// Closure to handle TCPListener until done channel is closed.
-	handleListener := func(idx int, listener net.Listener) {
+	handleListener := func(idx int, ln net.Listener) {
 		for {
-			conn, err := listener.Accept()
-			send(acceptResult{conn, err, idx})
+			conn, err := ln.Accept()
+			if err != nil && listener.ctx.Err() != nil {
+				if conn != nil {
+					conn.Close()
+				}
+				return
+			}
+			if !send(acceptResult{conn, err, idx}) {
+				if conn != nil {
+					conn.Close()
+				}
+				return
+			}
 		}
 	}
 

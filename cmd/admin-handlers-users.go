@@ -1021,6 +1021,10 @@ func (a adminAPIHandlers) ListServiceAccounts(w http.ResponseWriter, r *http.Req
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+		return
+	}
 
 	var targetAccount string
 
@@ -1182,6 +1186,10 @@ func (a adminAPIHandlers) ListAccessKeysBulk(w http.ResponseWriter, r *http.Requ
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+		return
+	}
 
 	users := r.Form["users"]
 	isAll := r.Form.Get("all") == "true"
@@ -1255,23 +1263,8 @@ func (a adminAPIHandlers) ListAccessKeysBulk(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	listType := r.Form.Get("listType")
-	var listSTSKeys, listServiceAccounts bool
-	switch listType {
-	case madmin.AccessKeyListUsersOnly:
-		listSTSKeys = false
-		listServiceAccounts = false
-	case madmin.AccessKeyListSTSOnly:
-		listSTSKeys = true
-		listServiceAccounts = false
-	case madmin.AccessKeyListSvcaccOnly:
-		listSTSKeys = false
-		listServiceAccounts = true
-	case madmin.AccessKeyListAll:
-		listSTSKeys = true
-		listServiceAccounts = true
-	default:
-		err := errors.New("invalid list type")
+	listSTSKeys, listServiceAccounts, err := parseAccessKeyBulkListType(r.Form.Get("listType"))
+	if err != nil {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErrWithErr(ErrInvalidRequest, err), r.URL)
 		return
 	}
@@ -2004,6 +1997,10 @@ func (a adminAPIHandlers) RevokeTokens(w http.ResponseWriter, r *http.Request) {
 	cred, owner, s3Err := validateAdminSignature(ctx, r, "")
 	if s3Err != ErrNone {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
+	if err := parseForm(r); err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
 		return
 	}
 

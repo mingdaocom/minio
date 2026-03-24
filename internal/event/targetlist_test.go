@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +32,14 @@ type ExampleTarget struct {
 	id       TargetID
 	sendErr  bool
 	closeErr bool
+}
+
+type asyncTarget struct {
+	id         TargetID
+	saveCh     chan Event
+	closeCh    chan struct{}
+	saveCalls  atomic.Int32
+	closeCalls atomic.Int32
 }
 
 func (target ExampleTarget) ID() TargetID {
@@ -81,6 +90,42 @@ func (target ExampleTarget) IsActive() (bool, error) {
 
 // FlushQueueStore - No-Op. Added for interface compatibility
 func (target ExampleTarget) FlushQueueStore() error {
+	return nil
+}
+
+func (target *asyncTarget) ID() TargetID {
+	return target.id
+}
+
+func (target *asyncTarget) Save(event Event) error {
+	target.saveCalls.Add(1)
+	if target.saveCh != nil {
+		target.saveCh <- event
+	}
+	return nil
+}
+
+func (target *asyncTarget) SendFromStore(_ store.Key) error {
+	return nil
+}
+
+func (target *asyncTarget) Close() error {
+	target.closeCalls.Add(1)
+	if target.closeCh != nil {
+		target.closeCh <- struct{}{}
+	}
+	return nil
+}
+
+func (target *asyncTarget) IsActive() (bool, error) {
+	return true, nil
+}
+
+func (target *asyncTarget) Store() TargetStore {
+	return nil
+}
+
+func (target *asyncTarget) FlushQueueStore() error {
 	return nil
 }
 
@@ -221,5 +266,102 @@ func TestTargetListList(t *testing.T) {
 func TestNewTargetList(t *testing.T) {
 	if result := NewTargetList(t.Context()); result == nil {
 		t.Fatalf("test: result: expected: <non-nil>, got: <nil>")
+	}
+}
+
+func TestTargetListInitProcessesAsyncSend(t *testing.T) {
+	t.Run("single instance", func(t *testing.T) {
+		list := NewTargetList(t.Context())
+		target := &asyncTarget{
+			id:     TargetID{"1", "webhook"},
+			saveCh: make(chan Event, 1),
+		}
+		if err := list.Add(target); err != nil {
+			t.Fatalf("unable to add target: %v", err)
+		}
+
+		list.Init(1)
+		list.Init(1)
+		list.Send(Event{}, NewTargetIDSet(target.id), false)
+
+		select {
+		case <-target.saveCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for async send to be processed")
+		}
+
+		if got := target.saveCalls.Load(); got != 1 {
+			t.Fatalf("expected exactly one save call, got %d", got)
+		}
+	})
+
+	t.Run("per instance", func(t *testing.T) {
+		list1 := NewTargetList(t.Context())
+		target1 := &asyncTarget{
+			id:     TargetID{"1", "webhook"},
+			saveCh: make(chan Event, 1),
+		}
+		if err := list1.Add(target1); err != nil {
+			t.Fatalf("unable to add target1: %v", err)
+		}
+		list1.Init(1)
+
+		list2 := NewTargetList(t.Context())
+		target2 := &asyncTarget{
+			id:     TargetID{"2", "webhook"},
+			saveCh: make(chan Event, 1),
+		}
+		if err := list2.Add(target2); err != nil {
+			t.Fatalf("unable to add target2: %v", err)
+		}
+		list2.Init(1)
+
+		list1.Send(Event{}, NewTargetIDSet(target1.id), false)
+		list2.Send(Event{}, NewTargetIDSet(target2.id), false)
+
+		select {
+		case <-target1.saveCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for list1 async send to be processed")
+		}
+
+		select {
+		case <-target2.saveCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for list2 async send to be processed")
+		}
+
+		if got := target1.saveCalls.Load(); got != 1 {
+			t.Fatalf("expected exactly one save call for list1, got %d", got)
+		}
+		if got := target2.saveCalls.Load(); got != 1 {
+			t.Fatalf("expected exactly one save call for list2, got %d", got)
+		}
+	})
+}
+
+func TestTargetListRemoveClosesAndDeletesTarget(t *testing.T) {
+	list := NewTargetList(t.Context())
+	target := &asyncTarget{
+		id:      TargetID{"1", "webhook"},
+		closeCh: make(chan struct{}, 1),
+	}
+	if err := list.Add(target); err != nil {
+		t.Fatalf("unable to add target: %v", err)
+	}
+
+	list.Remove(NewTargetIDSet(target.id))
+
+	select {
+	case <-target.closeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for target close")
+	}
+
+	if list.Exists(target.id) {
+		t.Fatal("expected target to be removed from list")
+	}
+	if got := target.closeCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly one close call, got %d", got)
 	}
 }
