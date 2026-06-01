@@ -17,10 +17,10 @@ echo "==> Build version: ${BUILD_VERSION}"
 echo "==> Release prefix: ${MINIO_RELEASE}"
 
 echo "==> Building linux/amd64 -> ./minio"
-env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o minio .
+env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags="${LDFLAGS}" -o minio .
 
 echo "==> Building linux/arm64 -> ./minio_arm"
-env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o minio_arm .
+env CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags="${LDFLAGS}" -o minio_arm .
 
 echo "==> Done"
 ls -lh ./minio ./minio_arm
