@@ -1,6 +1,6 @@
 module github.com/minio/minio
 
-go 1.26.3
+go 1.26.4
 
 // Install tools using 'go install tool'.
 tool (
